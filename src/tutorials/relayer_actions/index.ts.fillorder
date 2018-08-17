@@ -1,0 +1,136 @@
+import {
+    ZeroEx,
+    ZeroExConfig,
+} from '0x.js';
+import {
+    FeesRequest,
+    FeesResponse,
+    HttpClient,
+    Order,
+    OrderbookRequest,
+    OrderbookResponse,
+    SignedOrder,
+} from '@0xproject/connect';
+import { BigNumber } from '@0xproject/utils';
+import * as Web3 from 'web3';
+
+const mainAsync = async () => {
+    // Provider pointing to local TestRPC on default port 8545
+    const provider = new Web3.providers.HttpProvider('http://localhost:18545');
+
+    var web3 = new Web3(provider)
+
+    // Instantiate 0x.js instance
+    const zeroExConfig: ZeroExConfig = {
+        networkId: 50, // testrpc
+    };
+    const zeroEx = new ZeroEx(provider, zeroExConfig);
+
+    // Instantiate relayer client pointing to a local server on port 3000
+    const relayerApiUrl = 'http://localhost:8081/v0';
+    const relayerClient = new HttpClient(relayerApiUrl);
+
+    const relayer1ApiUrl = 'http://localhost:8082/v0';
+    const relayerClient1 = new HttpClient(relayer1ApiUrl);
+
+    // Get exchange contract address
+    const EXCHANGE_ADDRESS = await zeroEx.exchange.getContractAddress();
+
+    // Get token information
+    const wethTokenInfo = await zeroEx.tokenRegistry.getTokenBySymbolIfExistsAsync('WETH');
+    const zrxTokenInfo = await zeroEx.tokenRegistry.getTokenBySymbolIfExistsAsync('ZRX');
+
+    // Check if either getTokenBySymbolIfExistsAsync query resulted in undefined
+    if (wethTokenInfo === undefined || zrxTokenInfo === undefined) {
+        throw new Error('could not find token info');
+    }
+
+    // Get token contract addresses
+    const WETH_ADDRESS = wethTokenInfo.address;
+    const ZRX_ADDRESS = zrxTokenInfo.address;
+
+    // Get all available addresses
+    var addresses = await zeroEx.getAvailableAddressesAsync();
+
+    // Get the first address, this address is preloaded with a ZRX balance from the snapshot
+    const zrxOwnerAddress = addresses[0];
+
+    // Assign other addresses as WETH owners
+    const wethOwnerAddress = addresses[1]
+
+    addresses = [zrxOwnerAddress, wethOwnerAddress]
+    console.log(addresses)
+
+    // Get balances before the fill
+    var ethBalanceAccountOne = await web3.eth.getBalance(zrxOwnerAddress)
+    var wethBalanceAccountOne = await zeroEx.token.getBalanceAsync(WETH_ADDRESS, zrxOwnerAddress);
+    var zrxBalanceAccountOne = await zeroEx.token.getBalanceAsync(ZRX_ADDRESS, zrxOwnerAddress);
+    console.log('Account One ETH balance : ' + ethBalanceAccountOne);
+    console.log('Account One WETH balance: ' + ZeroEx.toUnitAmount(wethBalanceAccountOne, wethTokenInfo.decimals).toString());
+    console.log('Account One ZRX balance : ' + ZeroEx.toUnitAmount(zrxBalanceAccountOne, zrxTokenInfo.decimals).toString());
+
+
+    // Get balances before the fill
+    var ethBalanceAccountTwo = await web3.eth.getBalance(wethOwnerAddress)
+    var wethBalanceAccountTwo = await zeroEx.token.getBalanceAsync(WETH_ADDRESS, wethOwnerAddress);
+    var zrxBalanceAccountTwo = await zeroEx.token.getBalanceAsync(ZRX_ADDRESS, wethOwnerAddress );
+    console.log('Account Two ETH balance : ' + ethBalanceAccountTwo);
+    console.log('Account Two WETH balance: ' + ZeroEx.toUnitAmount(wethBalanceAccountTwo, wethTokenInfo.decimals).toString());
+    console.log('Account Two ZRX balance : ' + ZeroEx.toUnitAmount(zrxBalanceAccountTwo, zrxTokenInfo.decimals).toString());
+
+
+
+    console.log("--- Getting the order from relayer -----")
+     // Generate orderbook request for ZRX/WETH pair
+    const orderbookRequest: OrderbookRequest = {
+        baseTokenAddress: ZRX_ADDRESS,
+        quoteTokenAddress: WETH_ADDRESS,
+    };
+
+    // Send orderbook request to relayer and receive an OrderbookResponse instance
+    const orderbookResponse: OrderbookResponse = await relayerClient1.getOrderbookAsync(orderbookRequest);
+    console.log(orderbookResponse)
+
+    // Because we are looking to exchange our ZRX for WETH, we get the bids side of the order book
+    // Sort them with the best rate first
+    const sortedBids = orderbookResponse.bids.sort((orderA, orderB) => {
+        const orderRateA = (new BigNumber(orderA.makerTokenAmount)).div(new BigNumber(orderA.takerTokenAmount));
+        const orderRateB = (new BigNumber(orderB.makerTokenAmount)).div(new BigNumber(orderB.takerTokenAmount));
+        return orderRateB.comparedTo(orderRateA);
+    });
+
+    // Calculate and print out the WETH/ZRX exchange rates
+    const rates = sortedBids.map(order => {
+        const rate = (new BigNumber(order.makerTokenAmount)).div(new BigNumber(order.takerTokenAmount));
+        return (rate.toString() + ' WETH/ZRX');
+    });
+    console.log(rates);
+
+    console.log("--- Filling Order -----")
+    // Completely fill the best bid 
+    const bidToFill = sortedBids[0];
+    const fillTxHash = await zeroEx.exchange.fillOrderAsync(bidToFill, bidToFill.takerTokenAmount, true, zrxOwnerAddress);
+    await zeroEx.awaitTransactionMinedAsync(fillTxHash);
+
+    
+    console.log("--- Balance after fill -----")
+    ethBalanceAccountOne = await web3.eth.getBalance(zrxOwnerAddress)
+    wethBalanceAccountOne = await zeroEx.token.getBalanceAsync(WETH_ADDRESS, zrxOwnerAddress);
+    zrxBalanceAccountOne = await zeroEx.token.getBalanceAsync(ZRX_ADDRESS, zrxOwnerAddress);
+    console.log('Account One ETH balance : ' + ethBalanceAccountOne);
+    console.log('Account One WETH balance: ' + ZeroEx.toUnitAmount(wethBalanceAccountOne, wethTokenInfo.decimals).toString());
+    console.log('Account One ZRX balance : ' + ZeroEx.toUnitAmount(zrxBalanceAccountOne, zrxTokenInfo.decimals).toString());
+
+
+    // Get balances before the fill
+    ethBalanceAccountTwo = await web3.eth.getBalance(wethOwnerAddress)
+    wethBalanceAccountTwo = await zeroEx.token.getBalanceAsync(WETH_ADDRESS, wethOwnerAddress);
+    zrxBalanceAccountTwo = await zeroEx.token.getBalanceAsync(ZRX_ADDRESS, wethOwnerAddress );
+    console.log('Account Two ETH balance : ' + ethBalanceAccountTwo);
+    console.log('Account Two WETH balance: ' + ZeroEx.toUnitAmount(wethBalanceAccountTwo, wethTokenInfo.decimals).toString());
+    console.log('Account Two ZRX balance : ' + ZeroEx.toUnitAmount(zrxBalanceAccountTwo, zrxTokenInfo.decimals).toString());
+
+
+};
+
+mainAsync().catch(console.error);
